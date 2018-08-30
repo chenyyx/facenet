@@ -569,3 +569,25 @@ def write_arguments_to_file(args, filename):
     with open(filename, 'w') as f:
         for key, value in iteritems(vars(args)):
             f.write('%s: %s\n' % (key, str(value)))
+
+# a chenyyx function
+def dataset_from_list(data_dir,list_file):
+    dataset = []
+    lines = open(list_file,'r').read().strip().split('\n')
+    path_exp = os.path.expanduser(data_dir)
+    count = 1
+    class_paths = {}
+    for line in lines:
+        image_path, _ = line.split(' ')
+        class_name, _ = image_path.split('/')
+        if class_name not in class_paths:
+            class_paths[class_name] = []
+        full_image_path = os.path.join(path_exp,image_path)
+        assert os.path.exists(full_image_path), 'file {} not exist'.format(full_image_path)
+        class_paths[class_name].append(full_image_path)
+    dataset = []
+    keys = class_paths.keys()
+    keys.sort()
+    for key in keys:
+        dataset.append(ImageClass(key,class_paths[key]))
+    return dataset
