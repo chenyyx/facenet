@@ -1,3 +1,6 @@
+#!usr/bin/python
+# -*- coding: utf-8 -*-
+
 """Functions for building the face recognition network.
 """
 # MIT License
@@ -167,6 +170,7 @@ def _add_loss_summaries(total_loss):
 
 def train(total_loss, global_step, optimizer, learning_rate, moving_average_decay, update_gradient_vars, log_histograms=True):
     # Generate moving averages of all losses and associated summaries.
+    # 生成所有损失和相关摘要的移动平均值
     loss_averages_op = _add_loss_summaries(total_loss)
 
     # Compute gradients.

@@ -85,12 +85,13 @@ def main(args):
             filenames, label = input_queue.dequeue()
             images = []
             for filename in tf.unstack(filenames):
+                file_contents = tf.read_file(filename)
                 image = tf.image.decode_image(file_contents, channels=3)
 
                 if args.random_crop:
                     image = tf.random_crop(image, [args.image_size, args.image_size, 3])
                 else:
-                    image = tf.image.resize_image_with_crop_or_pad(iamge, args.image_size, args.image_size)
+                    image = tf.image.resize_image_with_crop_or_pad(image, args.image_size, args.image_size)
                 if args.random_flip:
                     image = tf.image.random_flip_left_right(image)
 
@@ -99,32 +100,86 @@ def main(args):
                 images.append(tf.image.per_image_standardization(image))
             images_and_labels.append([images, label])
 
-        image_batch, label_batch = tf.train.batch_join(
+        image_batch, labels_batch = tf.train.batch_join(
             images_and_labels, batch_size=batch_size_placeholder,
             shapes=[(args.image_size, args.image_size, 3), ()], enqueue_many=True,
             capacity=4 * nrof_preprocess_threads * args.batch_size,
-            allow_smaller_fine_batch=True)
+            allow_smaller_final_batch=True)
         image_batch = tf.identity(image_batch, 'image_batch')
         image_batch = tf.identity(image_batch, 'input')
         labels_batch = tf.identity(labels_batch, 'label_batch')
 
-        # 创建 inference graph
-        prelogits, _ = network.inference(image_batch, args.keep_probability,
-            phase_train=phase_train_placeholder, bottleneck_layer_size=args.embedding_size,
-            weight_decay=args.weight_decay)
+        # 首先在 一个 gpu 上运行 network 的 inference graph
+        with tf.device('/gpu:0'):
+            # 创建 inference graph
+            prelogits, _ = network.inference(image_batch, args.keep_probability,
+                phase_train=phase_train_placeholder, bottleneck_layer_size=args.embedding_size,
+                weight_decay=args.weight_decay)
+            # l2 normalize
+            embeddings = tf.nn.l2_normalize(prelogits, 1, 1e-10, name='embeddings')
+            # Split embedding into anchor, positive and negative and calculate teiplet loss
+            anchor, positive, negative = tf.unstack(tf.reshape(embeddings, [-1, 3, args.embedding_size]), 3, 1)
+            # ------------------- print start ---------------------------------
+            print('@@@@@@@@@@@@wwww', tf.shape(anchor))
+            print('############wwww', tf.shape(positive))
+            print('$$$$$$$$$$$$wwww', tf.shape(negative))
+            # ------------------- print end -----------------------------------
+
+            # 接着进行拆分，将 anchor, positive, negative 三组数据进行拆分，拆分成对应着 num_gpus 的份数
+            anchors = tf.split(anchor, num_or_size_splits=args.num_gpus, axis = 0)
+            positives = tf.split(positive, num_or_size_splits=args.num_gpus, axis = 0)
+            negatives = tf.split(negative, num_or_size_splits=args.num_gpus, axis = 0)
+            # ------------------- print start ---------------------------------
+            print('----------num_gpus ------', args.num_gpus)
+            print('@@@@@@@@@@@@ttt1', len(anchors))
+            print('@@@@@@@@@@@@ttt2', anchors[0].get_shape())
+            print('@@@@@@@@@@@@ttt3', anchors[1].get_shape())
+            print('############ttt', len(positives))
+            print('############ttt2', positives[0].get_shape())
+            print('############ttt3', positives[1].get_shape())
+            print('$$$$$$$$$$$$ttt', len(negatives))
+            print('$$$$$$$$$$$$ttt2', negatives[0].get_shape())
+            print('$$$$$$$$$$$$ttt3', negatives[1].get_shape())
+            # ------------------- print end -----------------------------------
+        # 在这部分修改为 multi-gpu 训练
+        # 即 将每一个 batch 均分，然后在多个 gpu 上来计算对应的 triplet_loss ，之后汇总得到和，求取平均，得到一个 batch_size 的 loss
+        tower_losses = []
+        tower_triplets = []
+        tower_reg = []
+        for i in range(args.num_gpus):
+            with tf.device("/gpu:" + str(i)):
+                with tf.name_scope("tower_" + str(i)) as scope:
+                    with tf.variable_scope(tf.get_variable_scope()) as var_scope:                   
+                        triplet_loss_split = facenet.triplet_loss(anchors[i], positive[i], negative[i], args.alpha)
+                        regularization_loss = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+                        tower_triplets.append(triplet_loss_split)
+                        loss = triplet_loss_split + tf.add_n(regularization_loss)
+                        tower_losses.append(loss)
+                        tower_reg.append(regularization_loss)
+        # 计算 multi gpu 运行完成得到的 loss
+        total_loss = tf.reduce_mean(tower_losses)
+        total_reg = tf.reduce_mean(tower_reg)
+        losses = {}
+        losses['total_loss'] = total_loss
+        losses['total_reg'] = total_reg
         
-        embeddings = tf.nn.l2_normalize(prelogits, 1, 1e-10, name='embeddings')
-        # Split embedding into anchor, positive and negative and calculate teiplet loss
-        anchor, positive, negative = tf.unstack(tf.reshape(embeddings, [-1, 3, args.embedding_size]), 3, 1)
-        triplet_loss = facenet.triplet_loss(anchor, positive, negative, args.alpha)
+
+        # # 创建 inference graph
+        # prelogits, _ = network.inference(image_batch, args.keep_probability,
+        #     phase_train=phase_train_placeholder, bottleneck_layer_size=args.embedding_size,
+        #     weight_decay=args.weight_decay)
+        
+        # embeddings = tf.nn.l2_normalize(prelogits, 1, 1e-10, name='embeddings')
+        # # Split embedding into anchor, positive and negative and calculate teiplet loss
+        # anchor, positive, negative = tf.unstack(tf.reshape(embeddings, [-1, 3, args.embedding_size]), 3, 1)
 
         learning_rate = tf.train.exponential_decay(learning_rate_placeholder, global_step,
             args.learning_rate_decay_epochs*args.epoch_size, args.learning_rate_decay_factor, staircase=True)
         tf.summary.scalar('learning_rate', learning_rate)
 
-        # 计算 total losses
-        regularization_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
-        total_loss = tf.add_n([triplet_loss] + regularization_losses, name='total_loss')
+        # # 计算 total losses
+        # regularization_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+        # total_loss = tf.add_n([triplet_loss] + regularization_losses, name='total_loss')
 
         # 创建 使用 1 个 batch 来训练模型并更新其中参数的 Graph
         train_op = facenet.train(total_loss, global_step, args.optimizer,
@@ -137,8 +192,8 @@ def main(args):
         summary_op = tf.summary.merge_all()
 
         # 在 Graph 启动 running operations
-        gpu_options = tf.GPUOptiopns(per_process_gpu_memory_fraction=args.gpu_memory_fraction)
-        sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
+        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=args.gpu_memory_fraction)
+        sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options,allow_soft_placement=True))
 
         # 初始化 variables
         sess.run(tf.global_variables_initializer(), feed_dict={phase_train_placeholder:True})
@@ -163,7 +218,7 @@ def main(args):
                 train(args, sess, train_set, epoch, image_paths_placeholder, labels_placeholder, labels_batch,
                         batch_size_placeholder, learning_rate_placeholder, phase_train_placeholder, enqueue_op, input_queue, global_step, 
                         embeddings, total_loss, train_op, summary_op, summary_writer, args.learning_rate_schedule_file,
-                        args.embedding_size, anchor, positive, negative, triplet_loss)
+                        args.embedding_size, anchor, positive, negative, total_loss)
                 
                 # Save variables and the metagraph if it doesn't exist already
                 save_variables_and_metagraph(sess, saver, summary_writer, model_dir, subdir, step)
@@ -185,7 +240,7 @@ def train(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholde
     if args.learning_rate>0.0:
         lr = args.learning_rate
     else:
-        lr = facenet.get_learning_rate_from_file(learnig_rate_schedule_file, epoch)
+        lr = facenet.get_learning_rate_from_file(learning_rate_schedule_file, epoch)
     while batch_number < args.epoch_size:
         # Sample people randomly from the dataset
         image_paths, num_per_class = sample_people(dataset, args.people_per_batch, args.images_per_person)
@@ -194,32 +249,48 @@ def train(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholde
         start_time = time.time()
         nrof_examples = args.people_per_batch * args.images_per_person
         labels_array = np.reshape(np.arange(nrof_examples), (-1, 3))
-        image_paths_array = np.reshape(np.extend_dims(np.array(image_paths), 1), (-1, 3))
+        image_paths_array = np.reshape(np.expand_dims(np.array(image_paths), 1), (-1, 3))
         sess.run(enqueue_op, {image_paths_placeholder: image_paths_array, labels_placeholder: labels_array})
         emb_array = np.zeros((nrof_examples, embedding_size))
         nrof_batches = int(np.ceil(nrof_examples / args.batch_size))
+        # ---------- print start -------------
+        print('nnnnnnnrof_batches', nrof_batches)
+        print('nnnnnnnrof_examples', nrof_examples)
+        print('bbbbbbatch_size', args.batch_size)
+        
+        # ---------- print end ---------------
         for i in range(nrof_batches):
             batch_size = min(nrof_examples-i*args.batch_size, args.batch_size)
-            emb, lab = sess.run([embeddings, labels_batch], feed_dcit={batch_size_placeholder:batch_size,
+            print('batch_size-=-=-=-=-=-', batch_size)
+            print('embedding-=-=-=-', embeddings)
+            print('labels_batch-=-=-=-=', labels_batch)
+            emb, lab = sess.run([embeddings, labels_batch], feed_dict={batch_size_placeholder:batch_size,
                 learning_rate_placeholder: lr, phase_train_placeholder: True})
+            print('embbbbbbbbbbb', emb)
+            print('labbbbbbbbbbb', lab)
+            print('emb_array-----', emb_array)
             emb_array[lab,:] = emb
-            print('%.3f' % (time.time()-start_time))
+            print('加载数据完毕，用时 %.3f' % (time.time()-start_time))
 
         # Select triplets based on the embeddings
         print('Selecting suitable triplets for training...')
         triplets, nrof_random_negs, nrof_triplets = select_triplets(emb_array, num_per_class, 
             image_paths, args.people_per_batch, args.alpha)
         selection_time = time.time() - start_time
-        print('(nrof_random_negs, nrif_triplets) = (%d, %d): time=%.3f seconds' %
+        print('选择 三元组 完毕 --- (nrof_random_negs, nrif_triplets) = (%d, %d): time=%.3f seconds' %
             (nrof_random_negs, nrof_triplets, selection_time))
 
         # 在选定的 triplets 上执行 训练 
         nrof_batches = int(np.ceil(nrof_triplets*3/args.batch_size))
+        print('选择出来的 triplets 形成的 batch 有多少个：', nrof_batches)
         triplet_paths = list(itertools.chain(*triplets))
+        # print('triplet_paths:', triplet_paths)
         labels_array = np.reshape(np.arange(len(triplet_paths)),(-1,3))
         triplet_paths_array = np.reshape(np.expand_dims(np.array(triplet_paths),1), (-1,3))
+        # 把 选择出来的 triplets 添加到 enqueue 中去
         sess.run(enqueue_op, {image_paths_placeholder: triplet_paths_array, labels_placeholder: labels_array})
         nrof_examples = len(triplet_paths)
+        print('选择出的 triplets 的个数为：', nrof_examples)
         train_time = 0
         i = 0
         emb_array = np.zeros((nrof_examples, embedding_size))
@@ -292,11 +363,13 @@ def select_triplets(embeddings, nrof_images_per_class, image_paths, people_per_b
 
 def sample_people(dataset, people_per_batch, images_per_person):
     nrof_images = people_per_batch * images_per_person
-
+    print('!!!!!!!!!!!!!nrof_images', nrof_images)
     # Sample classes from the dataset
     nrof_classes = len(dataset)
+    print('!!!!!!!!!!!!!nrof_classes', nrof_classes)
     class_indices = np.arange(nrof_classes)
     np.random.shuffle(class_indices)
+    print('!!!!!!!!!!!!!!!!',class_indices)
 
     i = 0
     image_paths = []
@@ -304,8 +377,11 @@ def sample_people(dataset, people_per_batch, images_per_person):
     sampled_class_indices = []
     # Sample image from these classes until we have enough
     while len(image_paths)<nrof_images:
+        print('leniiiiii', len(image_paths))
+        print('imagesiiii', nrof_images)
+        print('iiiiiiiiii', i)
         class_index = class_indices[i]
-        nrof_images_in_class = len(datast[class_index])
+        nrof_images_in_class = len(dataset[class_index])
         image_indices = np.arange(nrof_images_in_class)
         np.random.shuffle(image_indices)
         nrof_images_from_class = min(nrof_images_in_class, images_per_person, nrof_images-len(image_paths))
@@ -399,11 +475,11 @@ def parse_arguments(argv):
     parser = argparse.ArgumentParser()
     
     parser.add_argument('--logs_base_dir', type=str, 
-        help='Directory where to write event logs.', default='~/logs/facenet')
+        help='Directory where to write event logs.', default='logs/triplet_cy')
     parser.add_argument('--models_base_dir', type=str,
-        help='Directory where to write trained models and checkpoints.', default='~/models/facenet')
+        help='Directory where to write trained models and checkpoints.', default='models/triplets')
     parser.add_argument('--gpu_memory_fraction', type=float,
-        help='Upper bound on the amount of GPU memory that will be used by the process.', default=1.0)
+        help='Upper bound on the amount of GPU memory that will be used by the process.', default=0.9)
     parser.add_argument('--pretrained_model', type=str,
         help='Load a pretrained model before training starts.')
     parser.add_argument('--data_dir', type=str,
@@ -412,9 +488,9 @@ def parse_arguments(argv):
     parser.add_argument('--model_def', type=str,
         help='Model definition. Points to a module containing the definition of the inference graph.', default='models.inception_resnet_v1')
     parser.add_argument('--max_nrof_epochs', type=int,
-        help='Number of epochs to run.', default=500)
+        help='Number of epochs to run.', default=3)
     parser.add_argument('--batch_size', type=int,
-        help='Number of images to process in a batch.', default=90)
+        help='Number of images to process in a batch.', default=180)
     parser.add_argument('--image_size', type=int,
         help='Image size (height, width) in pixels.', default=160)
     parser.add_argument('--people_per_batch', type=int,
@@ -422,7 +498,7 @@ def parse_arguments(argv):
     parser.add_argument('--images_per_person', type=int,
         help='Number of images per person.', default=40)
     parser.add_argument('--epoch_size', type=int,
-        help='Number of batches per epoch.', default=1000)
+        help='Number of batches per epoch.', default=6)
     parser.add_argument('--alpha', type=float,
         help='Positive to negative triplet distance margin.', default=0.2)
     parser.add_argument('--embedding_size', type=int,
@@ -449,6 +525,8 @@ def parse_arguments(argv):
         help='Exponential decay for tracking of training parameters.', default=0.9999)
     parser.add_argument('--seed', type=int,
         help='Random seed.', default=666)
+    parser.add_argument('--num_gpus', type=int,
+        help='Number of gpus.', default=2)
     parser.add_argument('--learning_rate_schedule_file', type=str,
         help='File containing the learning rate schedule that is used when learning_rate is set to to -1.', default='data/learning_rate_schedule.txt')
 
