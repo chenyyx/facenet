@@ -24,8 +24,8 @@ from six.moves import xrange  # @UnresolvedImport
 
 import inception_resnet_v1 as inception_net
 
-# 设置 程序 可见的 GPU，指定为 0，1
-os.environ["CUDA_VISIBLE_DEVICES"]="0,1"
+# 设置 程序 可见的 GPU，指定为 2,3
+os.environ["CUDA_VISIBLE_DEVICES"]="2,3"
 
 
 def main(args):
@@ -57,6 +57,17 @@ def main(args):
     # 检测是否 已经有训练完成的 model 了
     # if args.pretrained_model:
     #     print('Pre-trained model: %s' % os.path.expanduser(args.pretrained_model))
+
+    # if args.lfw_dir:
+    #     print('LFW directory: %s' % args.lfw_dir)
+    #     # Read the file containing the pairs used for testing
+    #     pairs = lfw.read_pairs(os.path.expanduser(args.lfw_pairs))
+    #     # Get the paths for the corresponding images
+    #     lfw_paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
+    #     print('lfw_paths_len^^^^^^^^^^^^^^', len(lfw_paths))
+    #     print('lfw_paths^^^^^^^^^^^^^^', lfw_paths)
+    #     print('actual_issame_len^^^^^^^^^^', len(actual_issame))
+    #     print('actual_issame^^^^^^^^^^', actual_issame)
 
     with tf.Graph().as_default():
         tf.set_random_seed(args.seed)
@@ -99,17 +110,21 @@ def main(args):
                 image.set_shape((args.image_size, args.image_size, 3))
                 images.append(tf.image.per_image_standardization(image))
             images_and_labels.append([images, label])
-
+        # tf.train.batch_join() --- 运行 tensor list 来填充队列，以创建样本的批次。返回与 tensors_list[i] 有着相同数量和类型的张量的列的列表或者字典。
         image_batch, labels_batch = tf.train.batch_join(
             images_and_labels, batch_size=batch_size_placeholder,
             shapes=[(args.image_size, args.image_size, 3), ()], enqueue_many=True,
             capacity=4 * nrof_preprocess_threads * args.batch_size,
             allow_smaller_final_batch=True)
+        # tf.identity(input, name=None) --- 返回一个与 input 具有相同 shape 和 内容的 tensor
         image_batch = tf.identity(image_batch, 'image_batch')
         image_batch = tf.identity(image_batch, 'input')
         labels_batch = tf.identity(labels_batch, 'label_batch')
 
         # 首先在 一个 gpu 上运行 network 的 inference graph
+        with tf.device('/cpu:0'):
+            embeddings = []
+        # 在 gpu 0 上进行运行 inference graph
         with tf.device('/gpu:0'):
             # 创建 inference graph
             prelogits, _ = network.inference(image_batch, args.keep_probability,
@@ -117,30 +132,55 @@ def main(args):
                 weight_decay=args.weight_decay)
             # l2 normalize
             embeddings = tf.nn.l2_normalize(prelogits, 1, 1e-10, name='embeddings')
+            # ------ print start -----------
+            print('embeddings-------', embeddings)
+            # ------ print end -------------
             # Split embedding into anchor, positive and negative and calculate teiplet loss
             anchor, positive, negative = tf.unstack(tf.reshape(embeddings, [-1, 3, args.embedding_size]), 3, 1)
             # ------------------- print start ---------------------------------
-            print('@@@@@@@@@@@@wwww', tf.shape(anchor))
-            print('############wwww', tf.shape(positive))
-            print('$$$$$$$$$$$$wwww', tf.shape(negative))
+            # print('@@@@@@@@@@@@wwww', anchor.get_shape())
+            # print('############wwww', positive.get_shape())
+            # print('$$$$$$$$$$$$wwww', negative.get_shape())
             # ------------------- print end -----------------------------------
 
             # 接着进行拆分，将 anchor, positive, negative 三组数据进行拆分，拆分成对应着 num_gpus 的份数
-            anchors = tf.split(anchor, num_or_size_splits=args.num_gpus, axis = 0)
-            positives = tf.split(positive, num_or_size_splits=args.num_gpus, axis = 0)
-            negatives = tf.split(negative, num_or_size_splits=args.num_gpus, axis = 0)
+            # 但是这里有一个限制，所切分的 tensor 的维度，必须可以被 切分成的份数 整除， 所以直接使用 tf.split() 会报错
+            anchors = []
+            positives = []
+            negatives = []           
+            for i in range(args.num_gpus):
+                anchors_tmp = anchor[i::args.num_gpus]
+                anchors.append(anchors_tmp)
+                positives_tmp = positive[i::args.num_gpus]
+                positives.append(positives_tmp)
+                negatives_tmp = negative[i::args.num_gpus]
+                negatives.append(negatives_tmp)
+            # 将拆分得到的结果，进行类型转换
+            anchors = tf.convert_to_tensor(anchors)
+            positives = tf.convert_to_tensor(positives)
+            negatives = tf.convert_to_tensor(negatives)
+
             # ------------------- print start ---------------------------------
-            print('----------num_gpus ------', args.num_gpus)
-            print('@@@@@@@@@@@@ttt1', len(anchors))
-            print('@@@@@@@@@@@@ttt2', anchors[0].get_shape())
-            print('@@@@@@@@@@@@ttt3', anchors[1].get_shape())
-            print('############ttt', len(positives))
-            print('############ttt2', positives[0].get_shape())
-            print('############ttt3', positives[1].get_shape())
-            print('$$$$$$$$$$$$ttt', len(negatives))
-            print('$$$$$$$$$$$$ttt2', negatives[0].get_shape())
-            print('$$$$$$$$$$$$ttt3', negatives[1].get_shape())
+            # print('----------num_gpus ------', args.num_gpus)
+            # print('@@@@@@@@@@@@ttt1', anchors.get_shape())
+            # print('@@@@@@@@@@@@ttt2', anchors[0].get_shape())
+            # print('@@@@@@@@@@@@ttt3', anchors[1].get_shape())
+            # print('############ttt', positives.get_shape())
+            # print('############ttt2', positives[0].get_shape())
+            # print('############ttt3', positives[1].get_shape())
+            # print('$$$$$$$$$$$$ttt', negatives.get_shape())
+            # print('$$$$$$$$$$$$ttt2', negatives[0].get_shape())
+            # print('$$$$$$$$$$$$ttt3', negatives[1].get_shape())
             # ------------------- print end -----------------------------------
+        # -------print start 查看 emdedding 和 相对应的 3 个 anchors，positive，negative
+        # print('wowowowoowowow', embeddings.get_shape())
+        # print('wowninininini_anchors0', anchors[0].get_shape())
+        # print('wowninininini_anchors1', anchors[1].get_shape())
+        # print('wowninininini_positives0', positives[0].get_shape())
+        # print('wowninininini_positives1', positives[1].get_shape())
+        # print('wowninininini_negatives0', negatives[0].get_shape())
+        # print('wowninininini_negatives1', negatives[1].get_shape())
+        # ------ print end -------------------------
         # 在这部分修改为 multi-gpu 训练
         # 即 将每一个 batch 均分，然后在多个 gpu 上来计算对应的 triplet_loss ，之后汇总得到和，求取平均，得到一个 batch_size 的 loss
         tower_losses = []
@@ -205,9 +245,10 @@ def main(args):
 
         with sess.as_default():
 
-            if args.pretrained_model:
-                print('Restoring pretrained model: %s' % args.pretrained_model)
-                saver.restore(sess, os.path.expanduser(args.pretrained_model))
+            # if args.pretrained_model:
+            #     print('Restoring pretrained model: %s' % args.pretrained_model)
+            #     saver.restore(sess, os.path.expanduser(args.pretrained_model))
+                # facenet.load_model(args.pretrained_model)
             
             #Training and validation loop
             epoch = 0
@@ -215,19 +256,29 @@ def main(args):
                 step = sess.run(global_step, feed_dict=None)
                 epoch = step // args.epoch_size
                 # Train for one epoch
+                # --- print start ---
+                print('@@@@@@@@@@@@@@args.embedding_size', args.embedding_size)
+                print('@@@@@@@@@@@@@@anchor', anchor, anchor.get_shape())
+                print('@@@@@@@@@@@@@@positive', positive, positive.get_shape())
+                print('@@@@@@@@@@@@@@negative', negative, negative.get_shape())
+                print('@@@@@@@@@@@@@@total_loss', total_loss, total_loss.get_shape())
+                # --- print end -----
+
+                epoch_start_time = time.time()
                 train(args, sess, train_set, epoch, image_paths_placeholder, labels_placeholder, labels_batch,
                         batch_size_placeholder, learning_rate_placeholder, phase_train_placeholder, enqueue_op, input_queue, global_step, 
                         embeddings, total_loss, train_op, summary_op, summary_writer, args.learning_rate_schedule_file,
                         args.embedding_size, anchor, positive, negative, total_loss)
+                print('第 %d 个 epoch跑完，花费时间 %.3f' %(epoch, (time.time() - epoch_start_time)))
                 
                 # Save variables and the metagraph if it doesn't exist already
                 save_variables_and_metagraph(sess, saver, summary_writer, model_dir, subdir, step)
 
                 # Evaluate on LFW
-                if args.lfw_dir:
-                    evaluate(sess, lfw_paths, embeddings, labels_batch, image_paths_placeholder, labels_placeholder, 
-                                batch_size_placeholder, learning_rate_placeholder, phase_train_placeholder, enqueue_op, actual_issame, args.batch_size, 
-                                args.lfw_nrof_folds, log_dir, step, summary_writer, args.embedding_size)
+                # if args.lfw_dir:
+                #     evaluate(sess, lfw_paths, embeddings, labels_batch, image_paths_placeholder, labels_placeholder, 
+                #                 batch_size_placeholder, learning_rate_placeholder, phase_train_placeholder, enqueue_op, actual_issame, args.batch_size, 
+                #                 args.lfw_nrof_folds, log_dir, step, summary_writer, args.embedding_size)
 
     return model_dir
 
@@ -254,23 +305,25 @@ def train(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholde
         emb_array = np.zeros((nrof_examples, embedding_size))
         nrof_batches = int(np.ceil(nrof_examples / args.batch_size))
         # ---------- print start -------------
-        print('nnnnnnnrof_batches', nrof_batches)
-        print('nnnnnnnrof_examples', nrof_examples)
-        print('bbbbbbatch_size', args.batch_size)
+        # print('nnnnnnnrof_batches', nrof_batches)
+        # print('nnnnnnnrof_examples', nrof_examples)
+        # print('bbbbbbatch_size', args.batch_size)
         
         # ---------- print end ---------------
         for i in range(nrof_batches):
             batch_size = min(nrof_examples-i*args.batch_size, args.batch_size)
-            print('batch_size-=-=-=-=-=-', batch_size)
-            print('embedding-=-=-=-', embeddings)
-            print('labels_batch-=-=-=-=', labels_batch)
+            # ------------ print start ------------
+            # print('batch_size-=-=-=-=-=-', batch_size)
+            # print('embedding-=-=-=-', embeddings)
+            # print('labels_batch-=-=-=-=', labels_batch)
+            # ------------ print end ---------------
             emb, lab = sess.run([embeddings, labels_batch], feed_dict={batch_size_placeholder:batch_size,
                 learning_rate_placeholder: lr, phase_train_placeholder: True})
-            print('embbbbbbbbbbb', emb)
-            print('labbbbbbbbbbb', lab)
-            print('emb_array-----', emb_array)
+            # print('embbbbbbbbbbb', emb)
+            # print('labbbbbbbbbbb', lab)
+            # print('emb_array-----', emb_array)
             emb_array[lab,:] = emb
-            print('加载数据完毕，用时 %.3f' % (time.time()-start_time))
+        print('加载数据完毕，用时 %.3f' % (time.time()-start_time))
 
         # Select triplets based on the embeddings
         print('Selecting suitable triplets for training...')
@@ -301,6 +354,15 @@ def train(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholde
             start_time = time.time()
             batch_size = min(nrof_examples-i*args.batch_size, args.batch_size)
             feed_dict = {batch_size_placeholder: batch_size, learning_rate_placeholder: lr, phase_train_placeholder: True}
+            # --- print start ---
+            print('**************batch_size', batch_size)
+            print('**************lr', lr)
+            print('**************loss', loss, loss.get_shape())
+            print('**************train_op', train_op)
+            print('**************global_step', global_step)
+            print('**************embeddings', embeddings, embedding.get_shape())
+            print('**************labels_batch', labels_batch, labels_batch.get_shape())
+            # --- print end -----
             err, _, step, emb, lab = sess.run([loss, train_op, global_step, embeddings, labels_batch], feed_dict=feed_dict)
             emb_array[lab,:] = emb
             loss_array[i] = err
@@ -358,39 +420,65 @@ def select_triplets(embeddings, nrof_images_per_class, image_paths, people_per_b
         emb_start_idx += nrof_images
 
     np.random.shuffle(triplets)
-    return triplets, num_trips, len(triplets)
+    # ----------- print start -------------
+    # print('ttttttttriplet', len(triplets))
+    # print('num_trips', num_trips)
+    # print('wodemengxiang')
+    # ----------- print end ---------------
+    triplets_yyx = triplets[0:180]
+    # return triplets, num_trips, len(triplets)
+    return triplets, num_trips, len(triplets_yyx)
 
-
+# 从数据集中进行抽样图片，参数为训练数据集，每一个 batch 抽样多少人，每个人抽取多少张
 def sample_people(dataset, people_per_batch, images_per_person):
+    # 总共应该抽取多少张，默认：people_per_batch 是 45，images_per_person 是 40
     nrof_images = people_per_batch * images_per_person
-    print('!!!!!!!!!!!!!nrof_images', nrof_images)
+    # print('!!!!!!!!!!!!!nrof_images', nrof_images)
     # Sample classes from the dataset
+    # 数据集中一共有多少人的图像
     nrof_classes = len(dataset)
-    print('!!!!!!!!!!!!!nrof_classes', nrof_classes)
+    # print('!!!!!!!!!!!!!nrof_classes', nrof_classes)
+    # 每个人的索引
     class_indices = np.arange(nrof_classes)
+    # 随机打乱一下
     np.random.shuffle(class_indices)
-    print('!!!!!!!!!!!!!!!!',class_indices)
+    # print('!!!!!!!!!!!!!!!!',class_indices)
 
     i = 0
+    # 保存抽样出来的图像的路径
     image_paths = []
+    # 抽样的样本是属于哪一个人的，作为 label
     num_per_class = []
     sampled_class_indices = []
     # Sample image from these classes until we have enough
+    # 不断抽样直到达到指定数量
     while len(image_paths)<nrof_images:
-        print('leniiiiii', len(image_paths))
-        print('imagesiiii', nrof_images)
-        print('iiiiiiiiii', i)
+        # ------------- print start -----------
+        # print('leniiiiii', len(image_paths))
+        # print('imagesiiii', nrof_images)
+        # print('iiiiiiiiii', i)
+        # ------------- print end --------------
+        # 从第 i 个人开始抽样
         class_index = class_indices[i]
+        # 第 i 个人有多少张图片
         nrof_images_in_class = len(dataset[class_index])
+        # 这些图片的索引
         image_indices = np.arange(nrof_images_in_class)
+        # 将图片的索引进行一下打乱
         np.random.shuffle(image_indices)
+        # 从第 i 个人中抽样的图片数量
         nrof_images_from_class = min(nrof_images_in_class, images_per_person, nrof_images-len(image_paths))
         idx = image_indices[0:nrof_images_from_class]
+        # 抽样出来的人的图片的路径
         image_paths_for_class = [dataset[class_index].image_paths[j] for j in idx]
         image_paths += image_paths_for_class
+        # 第 i 个人抽样了多少张
         num_per_class.append(nrof_images_from_class)
         i += 1
-    
+    # ------------ print start ------------
+    # print('iiiimage_paths',len(image_paths))
+    # print('nnnnum_per_class', num_per_class)
+    # ------------ print end --------------
     return image_paths, num_per_class
 
 def evaluate(sess, image_paths, embeddings, labels_batch, image_paths_placeholder, labels_placeholder, 
@@ -407,6 +495,11 @@ def evaluate(sess, image_paths, embeddings, labels_batch, image_paths_placeholde
     sess.run(enqueue_op, {image_paths_placeholder: image_paths_array, labels_placeholder: labels_array})
     emb_array = np.zeros((nrof_images, embedding_size))
     nrof_batches = int(np.ceil(nrof_images / batch_size))
+    # ------------- print start -----------------
+    # print('nrof_images^^^^^', nrof_images)
+    # print('batch_size^^^^^^', batch_size)
+    # print('nrof_batches^^^^', nrof_batches)
+    # ------------- print end -------------------
     label_check_array = np.zeros((nrof_images,))
     for i in xrange(nrof_batches):
         batch_size = min(nrof_images-i*batch_size, batch_size)
@@ -414,7 +507,11 @@ def evaluate(sess, image_paths, embeddings, labels_batch, image_paths_placeholde
             learning_rate_placeholder: 0.0, phase_train_placeholder: False})
         emb_array[lab,:] = emb
         label_check_array[lab] = 1
-    print('%.3f' % (time.time()-start_time))
+    print('用时：%.3f' % (time.time()-start_time))
+    # --------- print start ---------------------
+    # print('label_check_array^^^^', label_check_array)
+    # print('if label-check_array == 1', np.all(label_check_array==1))
+    # --------- print end -----------------------
     
     assert(np.all(label_check_array==1))
     
@@ -481,14 +578,14 @@ def parse_arguments(argv):
     parser.add_argument('--gpu_memory_fraction', type=float,
         help='Upper bound on the amount of GPU memory that will be used by the process.', default=0.9)
     parser.add_argument('--pretrained_model', type=str,
-        help='Load a pretrained model before training starts.')
+        help='Load a pretrained model before training starts.', default='models/inception_resnet_v1_triplet_112_0,1_64._2._0.2_ADAM_--fc_bn_96_128/20180904-191008/model-20180904-191008.ckpt-273')
     parser.add_argument('--data_dir', type=str,
         help='Path to the data directory containing aligned face patches.',
         default='~/datasets/casia/casia_maxpy_mtcnnalign_182_160')
     parser.add_argument('--model_def', type=str,
         help='Model definition. Points to a module containing the definition of the inference graph.', default='models.inception_resnet_v1')
     parser.add_argument('--max_nrof_epochs', type=int,
-        help='Number of epochs to run.', default=3)
+        help='Number of epochs to run.', default=20)
     parser.add_argument('--batch_size', type=int,
         help='Number of images to process in a batch.', default=180)
     parser.add_argument('--image_size', type=int,
@@ -498,7 +595,7 @@ def parse_arguments(argv):
     parser.add_argument('--images_per_person', type=int,
         help='Number of images per person.', default=40)
     parser.add_argument('--epoch_size', type=int,
-        help='Number of batches per epoch.', default=6)
+        help='Number of batches per epoch.', default=200)
     parser.add_argument('--alpha', type=float,
         help='Positive to negative triplet distance margin.', default=0.2)
     parser.add_argument('--embedding_size', type=int,
@@ -532,9 +629,9 @@ def parse_arguments(argv):
 
     # Parameters for validation on LFW
     parser.add_argument('--lfw_pairs', type=str,
-        help='The file containing the pairs to use for validation.', default='data/pairs.txt')
+        help='The file containing the pairs to use for validation.', default='../data/pairs.txt')
     parser.add_argument('--lfw_dir', type=str,
-        help='Path to the data directory containing aligned face patches.', default='')
+        help='Path to the data directory containing aligned face patches.', default='/home/face/cosface_tf/dataset/lfw-112X96')
     parser.add_argument('--lfw_nrof_folds', type=int,
         help='Number of folds to use for cross validation. Mainly used for testing.', default=10)
     return parser.parse_args(argv)

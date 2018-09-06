@@ -1,3 +1,6 @@
+#!/usr/bin/python
+# -*- coding:utf-8 -*-
+
 """Validate a face recognizer on the "Labeled Faces in the Wild" dataset (http://vis-www.cs.umass.edu/lfw/).
 Embeddings are calculated using the pairs from http://vis-www.cs.umass.edu/lfw/pairs.txt and the ROC curve
 is calculated and plotted. Both the model metagraph and the model parameters need to exist
@@ -138,26 +141,26 @@ def evaluate(sess, enqueue_op, image_paths_placeholder, labels_placeholder, phas
 def parse_arguments(argv):
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('lfw_dir', type=str,
+    parser.add_argument('--lfw_dir', type=str,
         help='Path to the data directory containing aligned LFW face patches.')
     parser.add_argument('--lfw_batch_size', type=int,
         help='Number of images to process in a batch in the LFW test set.', default=100)
-    parser.add_argument('model', type=str, 
+    parser.add_argument('--model', type=str, 
         help='Could be either a directory containing the meta_file and ckpt_file or a model protobuf (.pb) file')
     parser.add_argument('--image_size', type=int,
         help='Image size (height, width) in pixels.', default=160)
     parser.add_argument('--lfw_pairs', type=str,
-        help='The file containing the pairs to use for validation.', default='data/pairs.txt')
+        help='The file containing the pairs to use for validation.', default='../data/pairs.txt')
     parser.add_argument('--lfw_nrof_folds', type=int,
         help='Number of folds to use for cross validation. Mainly used for testing.', default=10)
     parser.add_argument('--distance_metric', type=int,
         help='Distance metric  0:euclidian, 1:cosine similarity.', default=0)
     parser.add_argument('--use_flipped_images', 
-        help='Concatenates embeddings for the image and its horizontally flipped counterpart.', action='store_true')
+        help='Concatenates embeddings for the image and its horizontally flipped counterpart.', default=False, action='store_true')
     parser.add_argument('--subtract_mean', 
-        help='Subtract feature mean before calculating distance.', action='store_true')
+        help='Subtract feature mean before calculating distance.', default=True, action='store_true')
     parser.add_argument('--use_fixed_image_standardization', 
-        help='Performs fixed standardization of images.', action='store_true')
+        help='Performs fixed standardization of images.', default=True, action='store_true')
     return parser.parse_args(argv)
 
 if __name__ == '__main__':
