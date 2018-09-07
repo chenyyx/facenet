@@ -27,9 +27,77 @@ from tensorflow.python.ops import data_flow_ops
 
 from six.moves import xrange  # @UnresolvedImport
 
-def _from_tensor_slices(tensors_x,tensors_y):
-    #return TensorSliceDataset((tensors_x,tensors_y))
-    return tf_data.Dataset.from_tensor_slices((tensors_x,tensors_y))
+
+def select_triplets(embeddings, nrof_images_per_class, image_paths, people_per_batch, alpha):
+    """ Select the triplets for training
+    """
+    trip_idx = 0
+    emb_start_idx = 0
+    num_trips = 0
+    triplets = []
+    
+    # VGG Face: Choosing good triplets is crucial and should strike a balance between
+    #  selecting informative (i.e. challenging) examples and swamping training with examples that
+    #  are too hard. This is achieve by extending each pair (a, p) to a triplet (a, p, n) by sampling
+    #  the image n at random, but only between the ones that violate the triplet loss margin. The
+    #  latter is a form of hard-negative mining, but it is not as aggressive (and much cheaper) than
+    #  choosing the maximally violating example, as often done in structured output learning.
+
+    for i in xrange(people_per_batch):
+        nrof_images = int(nrof_images_per_class[i])
+        for j in xrange(1,nrof_images):
+            a_idx = emb_start_idx + j - 1
+            neg_dists_sqr = np.sum(np.square(embeddings[a_idx] - embeddings), 1)
+            for pair in xrange(j, nrof_images): # For every possible positive pair.
+                p_idx = emb_start_idx + pair
+                pos_dist_sqr = np.sum(np.square(embeddings[a_idx]-embeddings[p_idx]))
+                neg_dists_sqr[emb_start_idx:emb_start_idx+nrof_images] = np.NaN
+                #all_neg = np.where(np.logical_and(neg_dists_sqr-pos_dist_sqr<alpha, pos_dist_sqr<neg_dists_sqr))[0]  # FaceNet selection
+                all_neg = np.where(neg_dists_sqr-pos_dist_sqr<alpha)[0] # VGG Face selecction
+                nrof_random_negs = all_neg.shape[0]
+                if nrof_random_negs>0:
+                    rnd_idx = np.random.randint(nrof_random_negs)
+                    n_idx = all_neg[rnd_idx]
+                    triplets.append((image_paths[a_idx], image_paths[p_idx], image_paths[n_idx]))
+                    #print('Triplet %d: (%d, %d, %d), pos_dist=%2.6f, neg_dist=%2.6f (%d, %d, %d, %d, %d)' % 
+                    #    (trip_idx, a_idx, p_idx, n_idx, pos_dist_sqr, neg_dists_sqr[n_idx], nrof_random_negs, rnd_idx, i, j, emb_start_idx))
+                    trip_idx += 1
+
+                num_trips += 1
+
+        emb_start_idx += nrof_images
+
+    np.random.shuffle(triplets)
+    return triplets, num_trips, len(triplets)
+
+
+def sample_people(dataset, people_per_batch, images_per_person):
+    nrof_images = people_per_batch * images_per_person
+  
+    # Sample classes from the dataset
+    nrof_classes = len(dataset)
+    class_indices = np.arange(nrof_classes)
+    np.random.shuffle(class_indices)
+    
+    i = 0
+    image_paths = []
+    num_per_class = []
+    sampled_class_indices = []
+    # Sample images from these classes until we have enough
+    while len(image_paths)<nrof_images:
+        class_index = class_indices[i]
+        nrof_images_in_class = len(dataset[class_index])
+        image_indices = np.arange(nrof_images_in_class)
+        np.random.shuffle(image_indices)
+        nrof_images_from_class = min(nrof_images_in_class, images_per_person, nrof_images-len(image_paths))
+        idx = image_indices[0:nrof_images_from_class]
+        image_paths_for_class = [dataset[class_index].image_paths[j] for j in idx]
+        sampled_class_indices += [class_index]*nrof_images_from_class
+        image_paths += image_paths_for_class
+        num_per_class.append(nrof_images_from_class)
+        i+=1
+  
+    return image_paths, num_per_class
 
 
 
@@ -61,12 +129,12 @@ def main(args):
     if args.pretrained_model:
         print('Pre-trained model: %s' % os.path.expanduser(args.pretrained_model))
     
-    if args.lfw_dir:
-        print('LFW directory: %s' % args.lfw_dir)
-        # Read the file containing the pairs used for testing
-        pairs = lfw.read_pairs(os.path.expanduser(args.lfw_pairs))
-        # Get the paths for the corresponding images
-        lfw_paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
+    # if args.lfw_dir:
+    #     print('LFW directory: %s' % args.lfw_dir)
+    #     # Read the file containing the pairs used for testing
+    #     pairs = lfw.read_pairs(os.path.expanduser(args.lfw_pairs))
+    #     # Get the paths for the corresponding images
+    #     lfw_paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
 
     with tf.Graph().as_default():
         tf.set_random_seed(args.seed)
@@ -230,9 +298,9 @@ def main(args):
 
     return model_dir
 
-def train_multi_gpu(args, sess, dataset, epoch, 
-          learning_rate_placeholder, phase_train_placeholder, global_step, 
-          loss, train_op, summary_op, summary_writer, learning_rate_schedule_file):
+def train_multi_gpu(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholder, 
+          batch_size_placeholder, learning_rate_placeholder, phase_train_placeholder, enqueue_op,
+          global_step, loss, train_op, summary_op, summary_writer, learning_rate_schedule_file):
     batch_number = 0
 
     if args.learning_rate>0.0:
@@ -258,30 +326,39 @@ def train_multi_gpu(args, sess, dataset, epoch,
             emb_array[lab,:] = emb
         print('%.3f' % (time.time()-start_time))
 
-        
+        # Select triplets based on the embeddings
+        print('Selecting suitable triplets for training')
+        triplets, nrof_random_negs, nrof_triplets = select_triplets(emb_array, num_per_class, 
+            image_paths, args.people_per_batch, args.alpha)
+        selection_time = time.time() - start_time
+        print('(nrof_random_negs, nrof_triplets) = (%d, %d): time=%.3f seconds' % 
+            (nrof_random_negs, nrof_triplets, selection_time))
 
-
-def train(args, sess, epoch, 
-          learning_rate_placeholder, phase_train_placeholder, global_step, 
-          loss, train_op, summary_op, summary_writer, learning_rate_schedule_file):
-    batch_number = 0
-    
-    if args.learning_rate>0.0:
-        lr = args.learning_rate
-    else:
-        lr = utils.get_learning_rate_from_file(learning_rate_schedule_file, epoch)
-    while batch_number < args.epoch_size:
-        start_time = time.time()
-        
-        print('Running forward pass on sampled images: ', end='')
-        feed_dict = {learning_rate_placeholder: lr, phase_train_placeholder: True}
-        start_time = time.time()
-        total_err, reg_err, _, step = sess.run([loss['total_loss'], loss['total_reg'], train_op, global_step ], feed_dict=feed_dict)
-        duration = time.time() - start_time
-        print('Epoch: [%d][%d/%d]\tTime %.3f\tTotal Loss %2.3f\tReg Loss %2.3f, lr %2.5f' %
+        # Perform training on the selected triplets
+        nrof_batches = int(np.ceil(nrof_triplets*3/args.batch_size))
+        print('选择出来的 triplets 形成的 batch 有多少个：', nrof_batches)
+        triplet_paths = list(itertools.chain(*triplets))
+        labels_array = np.reshape(np.arange(len(triplet_paths)),(-1,3))
+        triplet_paths_array = np.reshape(np.expand_dims(np.array(triplet_paths),1), (-1,3))
+        sess.run(enqueue_op, {image_paths_placeholder: triplet_paths_array, labels_placeholder: labels_array})
+        nrof_examples = len(triplet_paths)
+        train_time = 0
+        i = 0
+        emb_array = np.zeros((nrof_examples, args.embedding_size))
+        loss_array = np.zeros((nrof_triplets,))
+        summary = tf.Summary()
+        step = 0
+        while i < nrof_batches:
+            start_time = time.time()
+            batch_size = min(nrof_examples-i*args.batch_size, args.batch_size)
+            feed_dict = {batch_size_placeholder: batch_size, learning_rate_placeholder: lr, phase_train_placeholder: True}
+            total_err, reg_err, _, step = sess.run([loss['total_loss'], loss['total_reg'], train_op, global_step], feed_dict=feed_dict)           
+            duration = time.time() - start_time
+            print('Epoch: [%d][%d/%d]\tTime %.3f\tTotal Loss %2.3f\tReg Loss %2.3f, lr %2.5f' %
                   (epoch, batch_number+1, args.epoch_size, duration, total_err, reg_err, lr))
-
-        batch_number += 1
+            batch_number += 1
+            i += 1
+            train_time += duration
     return step
  
 
@@ -326,69 +403,45 @@ def parse_arguments(argv):
     parser = argparse.ArgumentParser()
     
     parser.add_argument('--logs_base_dir', type=str, 
-        help='Directory where to write event logs.', default='logs/facenet_ms_mp')
+        help='Directory where to write event logs.', default='logs/facenet')
     parser.add_argument('--models_base_dir', type=str,
-        help='Directory where to write trained models and checkpoints.', default='models/facenet_ms_mp')
+        help='Directory where to write trained models and checkpoints.', default='models/facenet')
     parser.add_argument('--gpu_memory_fraction', type=float,
-        help='Upper bound on the amount of GPU memory that will be used by the process.', default=.9)
+        help='Upper bound on the amount of GPU memory that will be used by the process.', default=1.0)
     parser.add_argument('--pretrained_model', type=str,
-        help='Load a pretrained model before training starts.')
-    parser.add_argument('--loss_type', type=str,
-        help='Which type loss to be used.',default='softmax')
-    parser.add_argument('--network', type=str,
-        help='which network is used to extract feature.',default='resnet50')
+        help='Load a pretrained model before training starts.', default='models/inception_resnet_v1_triplet_112_0,1_64._2._0.2_ADAM_--fc_bn_96_128/20180905-132221/model-20180905-132221.ckpt-0')
     parser.add_argument('--data_dir', type=str,
-        help='Path to the data directory containing aligned face patches. Multiple directories are separated with colon.',
+        help='Path to the data directory containing aligned face patches.',
         default='~/datasets/casia/casia_maxpy_mtcnnalign_182_160')
-    parser.add_argument('--list_file', type=str,
-        help='Image list file')
     parser.add_argument('--model_def', type=str,
         help='Model definition. Points to a module containing the definition of the inference graph.', default='models.inception_resnet_v1')
     parser.add_argument('--max_nrof_epochs', type=int,
-        help='Number of epochs to run.', default=500)
+        help='Number of epochs to run.', default=1)
     parser.add_argument('--batch_size', type=int,
         help='Number of images to process in a batch.', default=90)
     parser.add_argument('--image_size', type=int,
         help='Image size (height, width) in pixels.', default=160)
-    parser.add_argument('--image_src_size', type=int,
-        help='Src Image size (height, width) in pixels.', default=256)
-    parser.add_argument('--image_height', type=int,
-        help='Image size (height, width) in pixels.', default=112)
-    parser.add_argument('--image_width', type=int,
-        help='Image size (height, width) in pixels.', default=96)
     parser.add_argument('--people_per_batch', type=int,
-        help='Number of people per batch.', default=30)
-    parser.add_argument('--num_gpus', type=int,
-        help='Number of gpus.', default=4)
+        help='Number of people per batch.', default=45)
     parser.add_argument('--images_per_person', type=int,
-        help='Number of images per person.', default=5)
+        help='Number of images per person.', default=40)
     parser.add_argument('--epoch_size', type=int,
-        help='Number of batches per epoch.', default=600)
+        help='Number of batches per epoch.', default=545)
     parser.add_argument('--alpha', type=float,
-        help='Margin for cos margin.', default=0.15)
-    parser.add_argument('--scale', type=float,
-        help='Scale as the fixed norm of weight and feature.', default=64.)
-    parser.add_argument('--weight', type=float,
-        help='weiht to balance the dist and th loss.', default=3.)
+        help='Positive to negative triplet distance margin.', default=0.2)
     parser.add_argument('--embedding_size', type=int,
-        help='Dimensionality of the embedding.', default=256)
+        help='Dimensionality of the embedding.', default=128)
     parser.add_argument('--random_crop', 
         help='Performs random cropping of training images. If false, the center image_size pixels from the training images are used. ' +
          'If the size of the images in the data directory is equal to image_size no cropping is performed', action='store_true')
     parser.add_argument('--random_flip', 
         help='Performs random horizontal flipping of training images.', action='store_true')
-    parser.add_argument('--fc_bn', 
-        help='Wheater use bn after fc.', action='store_true')
     parser.add_argument('--keep_probability', type=float,
         help='Keep probability of dropout for the fully connected layer(s).', default=1.0)
     parser.add_argument('--weight_decay', type=float,
         help='L2 weight regularization.', default=0.0)
-    parser.add_argument('--optimizer', type=str, choices=['ADAGRAD', 'ADADELTA', 'ADAM', 'RMSPROP', 'MOM','SGD'],
+    parser.add_argument('--optimizer', type=str, choices=['ADAGRAD', 'ADADELTA', 'ADAM', 'RMSPROP', 'MOM'],
         help='The optimization algorithm to use', default='ADAGRAD')
-    parser.add_argument('--center_loss_factor', type=float,
-        help='Center loss factor.', default=0.0)
-    parser.add_argument('--center_loss_alfa', type=float,
-        help='Center update rate for center loss.', default=0.95)
     parser.add_argument('--learning_rate', type=float,
         help='Initial learning rate. If set to a negative value a learning rate ' +
         'schedule can be specified in the file "learning_rate_schedule.txt"', default=0.1)
@@ -403,7 +456,13 @@ def parse_arguments(argv):
     parser.add_argument('--learning_rate_schedule_file', type=str,
         help='File containing the learning rate schedule that is used when learning_rate is set to to -1.', default='data/learning_rate_schedule.txt')
 
-    
+    # Parameters for validation on LFW
+    parser.add_argument('--lfw_pairs', type=str,
+        help='The file containing the pairs to use for validation.', default='../data/pairs.txt')
+    parser.add_argument('--lfw_dir', type=str,
+        help='Path to the data directory containing aligned face patches.', default='/Users/chenyao/Documents/dataset/lfw/lfw-112X96')
+    parser.add_argument('--lfw_nrof_folds', type=int,
+        help='Number of folds to use for cross validation. Mainly used for testing.', default=10)
     return parser.parse_args(argv)
   
 
