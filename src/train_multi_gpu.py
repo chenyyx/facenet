@@ -124,8 +124,11 @@ def main(args):
         # 首先在 一个 gpu 上运行 network 的 inference graph
         with tf.device('/cpu:0'):
             embeddings = []
+            anchors = []
+            positives = []
+            negatives = [] 
         # 在 gpu 0 上进行运行 inference graph
-        with tf.device('/gpu:0'):
+        with tf.device('/gpu:2'):
             # 创建 inference graph
             prelogits, _ = network.inference(image_batch, args.keep_probability,
                 phase_train=phase_train_placeholder, bottleneck_layer_size=args.embedding_size,
@@ -145,9 +148,7 @@ def main(args):
 
             # 接着进行拆分，将 anchor, positive, negative 三组数据进行拆分，拆分成对应着 num_gpus 的份数
             # 但是这里有一个限制，所切分的 tensor 的维度，必须可以被 切分成的份数 整除， 所以直接使用 tf.split() 会报错
-            anchors = []
-            positives = []
-            negatives = []           
+                      
             for i in range(args.num_gpus):
                 anchors_tmp = anchor[i::args.num_gpus]
                 anchors.append(anchors_tmp)
@@ -155,23 +156,7 @@ def main(args):
                 positives.append(positives_tmp)
                 negatives_tmp = negative[i::args.num_gpus]
                 negatives.append(negatives_tmp)
-            # 将拆分得到的结果，进行类型转换
-            anchors = tf.convert_to_tensor(anchors)
-            positives = tf.convert_to_tensor(positives)
-            negatives = tf.convert_to_tensor(negatives)
 
-            # ------------------- print start ---------------------------------
-            # print('----------num_gpus ------', args.num_gpus)
-            # print('@@@@@@@@@@@@ttt1', anchors.get_shape())
-            # print('@@@@@@@@@@@@ttt2', anchors[0].get_shape())
-            # print('@@@@@@@@@@@@ttt3', anchors[1].get_shape())
-            # print('############ttt', positives.get_shape())
-            # print('############ttt2', positives[0].get_shape())
-            # print('############ttt3', positives[1].get_shape())
-            # print('$$$$$$$$$$$$ttt', negatives.get_shape())
-            # print('$$$$$$$$$$$$ttt2', negatives[0].get_shape())
-            # print('$$$$$$$$$$$$ttt3', negatives[1].get_shape())
-            # ------------------- print end -----------------------------------
         # -------print start 查看 emdedding 和 相对应的 3 个 anchors，positive，negative
         # print('wowowowoowowow', embeddings.get_shape())
         # print('wowninininini_anchors0', anchors[0].get_shape())
@@ -183,25 +168,25 @@ def main(args):
         # ------ print end -------------------------
         # 在这部分修改为 multi-gpu 训练
         # 即 将每一个 batch 均分，然后在多个 gpu 上来计算对应的 triplet_loss ，之后汇总得到和，求取平均，得到一个 batch_size 的 loss
-        tower_losses = []
-        tower_triplets = []
-        tower_reg = []
-        for i in range(args.num_gpus):
-            with tf.device("/gpu:" + str(i)):
-                with tf.name_scope("tower_" + str(i)) as scope:
-                    with tf.variable_scope(tf.get_variable_scope()) as var_scope:                   
-                        triplet_loss_split = facenet.triplet_loss(anchors[i], positive[i], negative[i], args.alpha)
-                        regularization_loss = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
-                        tower_triplets.append(triplet_loss_split)
-                        loss = triplet_loss_split + tf.add_n(regularization_loss)
-                        tower_losses.append(loss)
-                        tower_reg.append(regularization_loss)
-        # 计算 multi gpu 运行完成得到的 loss
-        total_loss = tf.reduce_mean(tower_losses)
-        total_reg = tf.reduce_mean(tower_reg)
-        losses = {}
-        losses['total_loss'] = total_loss
-        losses['total_reg'] = total_reg
+        # tower_losses = []
+        # tower_triplets = []
+        # tower_reg = []
+        # for i in range(args.num_gpus):
+        #     with tf.device("/gpu:" + str(i)):
+        #         with tf.name_scope("tower_" + str(i)) as scope:
+        #             with tf.variable_scope(tf.get_variable_scope()) as var_scope:                   
+        #                 triplet_loss_split = facenet.triplet_loss(anchors[i], positive[i], negative[i], args.alpha)
+        #                 regularization_loss = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+        #                 tower_triplets.append(triplet_loss_split)
+        #                 loss = triplet_loss_split + tf.add_n(regularization_loss)
+        #                 tower_losses.append(loss)
+        #                 tower_reg.append(regularization_loss)
+        # # 计算 multi gpu 运行完成得到的 loss
+        # total_loss = tf.reduce_mean(tower_losses)
+        # total_reg = tf.reduce_mean(tower_reg)
+        # losses = {}
+        # losses['total_loss'] = total_loss
+        # losses['total_reg'] = total_reg
         
 
         # # 创建 inference graph
@@ -222,8 +207,11 @@ def main(args):
         # total_loss = tf.add_n([triplet_loss] + regularization_losses, name='total_loss')
 
         # 创建 使用 1 个 batch 来训练模型并更新其中参数的 Graph
-        train_op = facenet.train(total_loss, global_step, args.optimizer,
-            learning_rate, args.moving_average_decay, tf.global_variables())
+        # train_op = facenet.train(total_loss, global_step, args.optimizer,
+            # learning_rate, args.moving_average_decay, tf.global_variables())
+
+        # 在多 gpu 上训练的改版
+        train_op, total_loss = facenet.train_multi_gpu(args.num_gpus, anchors, positives, negatives, args.alpha, global_step, args.optimizer, learning_rate, args.moving_average_decay, tf.global_variables())
 
         # Create a saver
         saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=3)
@@ -265,10 +253,18 @@ def main(args):
                 # --- print end -----
 
                 epoch_start_time = time.time()
-                train(args, sess, train_set, epoch, image_paths_placeholder, labels_placeholder, labels_batch,
+                # origin
+                # train(args, sess, train_set, epoch, image_paths_placeholder, labels_placeholder, labels_batch,
+                #         batch_size_placeholder, learning_rate_placeholder, phase_train_placeholder, enqueue_op, input_queue, global_step, 
+                #         embeddings, total_loss, train_op, summary_op, summary_writer, args.learning_rate_schedule_file,
+                #         args.embedding_size, anchor, positive, negative, total_loss)
+                # print('第 %d 个 epoch跑完，花费时间 %.3f' %(epoch, (time.time() - epoch_start_time)))
+
+                # modified training
+                train_multi_gpus(args, sess, train_set, epoch, image_paths_placeholder, labels_placeholder, labels_batch,
                         batch_size_placeholder, learning_rate_placeholder, phase_train_placeholder, enqueue_op, input_queue, global_step, 
-                        embeddings, total_loss, train_op, summary_op, summary_writer, args.learning_rate_schedule_file,
-                        args.embedding_size, anchor, positive, negative, total_loss)
+                        embeddings, anchors, positives, negatives, train_op, summary_op, summary_writer, args.learning_rate_schedule_file,
+                        args.embedding_size)
                 print('第 %d 个 epoch跑完，花费时间 %.3f' %(epoch, (time.time() - epoch_start_time)))
                 
                 # Save variables and the metagraph if it doesn't exist already
@@ -360,7 +356,7 @@ def train(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholde
             print('**************loss', loss, loss.get_shape())
             print('**************train_op', train_op)
             print('**************global_step', global_step)
-            print('**************embeddings', embeddings, embedding.get_shape())
+            print('**************embeddings', embeddings, embeddings.get_shape())
             print('**************labels_batch', labels_batch, labels_batch.get_shape())
             # --- print end -----
             err, _, step, emb, lab = sess.run([loss, train_op, global_step, embeddings, labels_batch], feed_dict=feed_dict)
@@ -379,6 +375,126 @@ def train(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholde
         summary.value.add(tag='time/selection', simple_value=selection_time)
         summary_writer.add_summary(summary, step)
     return step
+
+def train_multi_gpus(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholder, labels_batch,
+          batch_size_placeholder, learning_rate_placeholder, phase_train_placeholder, enqueue_op, input_queue, global_step, 
+          embeddings, anchors, positives, negatives, train_op, summary_op, summary_writer, learning_rate_schedule_file,
+          embedding_size):
+    batch_number = 0
+
+    if args.learning_rate>0.0:
+        lr = args.learning_rate
+    else:
+        lr = facenet.get_learning_rate_from_file(learning_rate_schedule_file, epoch)
+    while batch_number < args.epoch_size:
+        # Sample people randomly from the dataset
+        image_paths, num_per_class = sample_people(dataset, args.people_per_batch, args.images_per_person)
+
+        print('Running forward pass on sampled images: ', end='')
+        start_time = time.time()
+        nrof_examples = args.people_per_batch * args.images_per_person
+        labels_array = np.reshape(np.arange(nrof_examples), (-1, 3))
+        image_paths_array = np.reshape(np.expand_dims(np.array(image_paths), 1), (-1, 3))
+        sess.run(enqueue_op, {image_paths_placeholder: image_paths_array, labels_placeholder: labels_array})
+        emb_array = np.zeros((nrof_examples, embedding_size))
+        nrof_batches = int(np.ceil(nrof_examples / args.batch_size))
+        
+        for i in range(nrof_batches):
+            batch_size = min(nrof_examples-i*args.batch_size, args.batch_size)
+            emb, lab = sess.run([embeddings, labels_batch], feed_dict={batch_size_placeholder:batch_size,
+                learning_rate_placeholder: lr, phase_train_placeholder: True})
+            emb_array[lab,:] = emb
+        print('加载数据完毕，用时 %.3f' % (time.time()-start_time))
+
+        # Select triplets based on the embeddings
+        print('Selecting suitable triplets for training...')
+        triplets, nrof_random_negs, nrof_triplets = select_triplets(emb_array, num_per_class, 
+            image_paths, args.people_per_batch, args.alpha)
+        selection_time = time.time() - start_time
+        print('选择 三元组 完毕 --- (nrof_random_negs, nrif_triplets) = (%d, %d): time=%.3f seconds' %
+            (nrof_random_negs, nrof_triplets, selection_time))
+
+        # 在选定的 triplets 上执行 训练 
+        nrof_batches = int(np.ceil(nrof_triplets*3/args.batch_size))
+        print('选择出来的 triplets 形成的 batch 有多少个：', nrof_batches)
+        triplet_paths = list(itertools.chain(*triplets))
+        # print('triplet_paths:', triplet_paths)
+        labels_array = np.reshape(np.arange(len(triplet_paths)),(-1,3))
+        triplet_paths_array = np.reshape(np.expand_dims(np.array(triplet_paths),1), (-1,3))
+        # 把 选择出来的 triplets 添加到 enqueue 中去
+        sess.run(enqueue_op, {image_paths_placeholder: triplet_paths_array, labels_placeholder: labels_array})
+        nrof_examples = len(triplet_paths)
+        print('选择出的 triplets 的个数为：', nrof_examples)
+        train_time = 0
+        i = 0
+        emb_array = np.zeros((nrof_examples, embedding_size))
+        loss_array = np.zeros((nrof_triplets,))
+        summary = tf.Summary()
+        step = 0
+        while i < nrof_batches:
+            start_time = time.time()
+
+            # 添加 计算 loss 的代码，加在此处，是因为每个 epoch 中的每个 batch 都要计算一下 loss
+            # First, calculate the total_loss to run the following code
+            # 在这部分修改为 multi-gpu 训练
+            # 即 将每一个 batch 均分，然后在多个 gpu 上来计算对应的 triplet_loss ，之后汇总得到和，求取平均，得到一个 batch_size 的 loss
+            tower_losses = []
+            tower_triplets = []
+            tower_reg = []
+            with tf.variable_scope(tf.get_variable_scope()):
+                for i in range(args.num_gpus):
+                    with tf.device('/gpu:' + str(i+2)):
+                        with tf.name_scope('tower_' + str(i)) as scope:
+                            print('###'*10, i)
+                            print('---'*10, anchors[i])
+                            print('---'*10, positives[i])
+                            print('---'*10, negatives[i])
+                            print('###'*10, i)
+                            triplet_loss_split = facenet.triplet_loss(anchors[i], positives[i], negatives[i], args.alpha)
+                            regularization_loss = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+                            # 添加本行代码，进行同名变量的重用
+                            tf.get_variable_scope().reuse_variables()
+                            tower_triplets.append(triplet_loss_split)
+                            loss = triplet_loss_split + tf.add_n(regularization_loss)
+                            tower_losses.append(loss)
+                            tower_reg.append(regularization_loss)
+            # 计算 multi gpu 运行完成得到的 loss
+            total_loss = tf.reduce_mean(tower_losses)
+            total_reg = tf.reduce_mean(tower_reg)
+            losses = {}
+            losses['total_loss'] = total_loss
+            losses['total_reg'] = total_reg
+
+            loss = total_loss
+
+            batch_size = min(nrof_examples-i*args.batch_size, args.batch_size)
+            feed_dict = {batch_size_placeholder: batch_size, learning_rate_placeholder: lr, phase_train_placeholder: True}
+            # --- print start ---
+            print('**************batch_size', batch_size)
+            print('**************lr', lr)
+            print('**************loss', loss, loss.get_shape())
+            print('**************train_op', train_op)
+            print('**************global_step', global_step)
+            print('**************embeddings', embeddings, embeddings.get_shape())
+            print('**************labels_batch', labels_batch, labels_batch.get_shape())
+            # --- print end -----
+            err, _, step, emb, lab = sess.run([loss, train_op, global_step, embeddings, labels_batch], feed_dict=feed_dict)
+            emb_array[lab,:] = emb
+            loss_array[i] = err
+            duration = time.time() - start_time
+            print('Epoch: [%d][%d/%d]\tTime %.3f\tLoss %2.3f' %
+                  (epoch, batch_number+1, args.epoch_size, duration, err))
+            batch_number += 1
+            i += 1
+            train_time += duration
+            summary.value.add(tag='loss', simple_value=err)
+            
+        # Add validation loss and accuracy to summary
+        #pylint: disable=maybe-no-member
+        summary.value.add(tag='time/selection', simple_value=selection_time)
+        summary_writer.add_summary(summary, step)
+    return step
+
 
 def select_triplets(embeddings, nrof_images_per_class, image_paths, people_per_batch, alpha):
     """ Select the triplets for training

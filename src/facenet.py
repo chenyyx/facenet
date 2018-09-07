@@ -574,24 +574,74 @@ def write_arguments_to_file(args, filename):
         for key, value in iteritems(vars(args)):
             f.write('%s: %s\n' % (key, str(value)))
 
-# a chenyyx function
-def dataset_from_list(data_dir,list_file):
-    dataset = []
-    lines = open(list_file,'r').read().strip().split('\n')
-    path_exp = os.path.expanduser(data_dir)
-    count = 1
-    class_paths = {}
-    for line in lines:
-        image_path, _ = line.split(' ')
-        class_name, _ = image_path.split('/')
-        if class_name not in class_paths:
-            class_paths[class_name] = []
-        full_image_path = os.path.join(path_exp,image_path)
-        assert os.path.exists(full_image_path), 'file {} not exist'.format(full_image_path)
-        class_paths[class_name].append(full_image_path)
-    dataset = []
-    keys = class_paths.keys()
-    keys.sort()
-    for key in keys:
-        dataset.append(ImageClass(key,class_paths[key]))
-    return dataset
+# chenyyx function
+# 多 gpu 训练
+def train_multi_gpu(num_gpus, anchors, positives, negatives, alpha, global_step, optimizer, learning_rate, moving_average_decay, update_gradient_vars, log_histograms=True):
+    # First, calculate the loss and get the total_loss
+    # 在这部分修改为 multi-gpu 训练
+    # 即 将每一个 batch 均分，然后在多个 gpu 上来计算对应的 triplet_loss ，之后汇总得到和，求取平均，得到一个 batch_size 的 loss
+    tower_losses = []
+    tower_triplets = []
+    tower_reg = []
+    with tf.variable_scope(tf.get_variable_scope()):
+        for i in range(num_gpus):
+            with tf.device('/gpu:' + str(i+2)):
+                with tf.name_scope('tower_' + str(i)) as scope:
+                    triplet_loss_split = triplet_loss(anchors[i], positives[i], negatives[i], alpha)
+                    regularization_loss = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+                    tower_triplets.append(triplet_loss_split)
+                    loss = triplet_loss_split + tf.add_n(regularization_loss)
+                    tower_losses.append(loss)
+                    tower_reg.append(regularization_loss)
+    # 计算 multi gpu 运行完成得到的 loss
+    total_loss = tf.reduce_mean(tower_losses)
+    total_reg = tf.reduce_mean(tower_reg)
+    losses = {}
+    losses['total_loss'] = total_loss
+    losses['total_reg'] = total_reg
+
+
+    # Generate moving averages of all losses and associated summaries.
+    # 生成所有损失和相关摘要的移动平均值
+    loss_averages_op = _add_loss_summaries(total_loss)
+
+    # Compute gradients.
+    with tf.control_dependencies([loss_averages_op]):
+        if optimizer=='ADAGRAD':
+            opt = tf.train.AdagradOptimizer(learning_rate)
+        elif optimizer=='ADADELTA':
+            opt = tf.train.AdadeltaOptimizer(learning_rate, rho=0.9, epsilon=1e-6)
+        elif optimizer=='ADAM':
+            opt = tf.train.AdamOptimizer(learning_rate, beta1=0.9, beta2=0.999, epsilon=0.1)
+        elif optimizer=='RMSPROP':
+            opt = tf.train.RMSPropOptimizer(learning_rate, decay=0.9, momentum=0.9, epsilon=1.0)
+        elif optimizer=='MOM':
+            opt = tf.train.MomentumOptimizer(learning_rate, 0.9, use_nesterov=True)
+        else:
+            raise ValueError('Invalid optimization algorithm')
+    
+        grads = opt.compute_gradients(total_loss, update_gradient_vars)
+        
+    # Apply gradients.
+    apply_gradient_op = opt.apply_gradients(grads, global_step=global_step)
+  
+    # Add histograms for trainable variables.
+    if log_histograms:
+        for var in tf.trainable_variables():
+            tf.summary.histogram(var.op.name, var)
+   
+    # Add histograms for gradients.
+    if log_histograms:
+        for grad, var in grads:
+            if grad is not None:
+                tf.summary.histogram(var.op.name + '/gradients', grad)
+  
+    # Track the moving averages of all trainable variables.
+    variable_averages = tf.train.ExponentialMovingAverage(
+        moving_average_decay, global_step)
+    variables_averages_op = variable_averages.apply(tf.trainable_variables())
+  
+    with tf.control_dependencies([apply_gradient_op, variables_averages_op]):
+        train_op = tf.no_op(name='train')
+  
+    return train_op, total_loss
