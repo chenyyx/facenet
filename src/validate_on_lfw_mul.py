@@ -1,32 +1,5 @@
-#!/usr/bin/python
-# -*- coding:utf-8 -*-
-
-"""Validate a face recognizer on the "Labeled Faces in the Wild" dataset (http://vis-www.cs.umass.edu/lfw/).
-Embeddings are calculated using the pairs from http://vis-www.cs.umass.edu/lfw/pairs.txt and the ROC curve
-is calculated and plotted. Both the model metagraph and the model parameters need to exist
-in the same directory, and the metagraph should have the extension '.meta'.
-"""
-# MIT License
-# 
-# Copyright (c) 2016 David Sandberg
-# 
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-# 
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-# 
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+#!usr/bin/python
+# -*- coding: utf-8 -*-
 
 from __future__ import absolute_import
 from __future__ import division
@@ -37,9 +10,12 @@ import numpy as np
 import argparse
 import facenet
 import lfw
+import math
 import os
 import sys
+sys.path.insert(0, 'models')
 from tensorflow.python.ops import data_flow_ops
+import importlib
 from sklearn import metrics
 from scipy.optimize import brentq
 from scipy import interpolate
@@ -51,11 +27,16 @@ def main(args):
         with tf.Session() as sess:
             
             # Read the file containing the pairs used for testing
+            # 读取包含用于 test 的 pairs 的文件
             pairs = lfw.read_pairs(os.path.expanduser(args.lfw_pairs))
+            #pdb.set_trace()
 
             # Get the paths for the corresponding images
-            paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
-            
+            # 获取相应图像的路径
+            paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs, args.lfw_file_ext)
+
+            network = importlib.import_module(args.model_def)
+
             image_paths_placeholder = tf.placeholder(tf.string, shape=(None,1), name='image_paths')
             labels_placeholder = tf.placeholder(tf.int32, shape=(None,1), name='labels')
             batch_size_placeholder = tf.placeholder(tf.int32, name='batch_size')
@@ -70,30 +51,35 @@ def main(args):
                                         shared_name=None, name=None)
             eval_enqueue_op = eval_input_queue.enqueue_many([image_paths_placeholder, labels_placeholder, control_placeholder], name='eval_enqueue_op')
             image_batch, label_batch = facenet.create_input_pipeline(eval_input_queue, image_size, nrof_preprocess_threads, batch_size_placeholder)
-     
+           
             # Load the model
             input_map = {'image_batch': image_batch, 'label_batch': label_batch, 'phase_train': phase_train_placeholder}
             facenet.load_model(args.model, input_map=input_map)
-            print('####' * 10)
 
-            # 输出所有的变量
-            # print('&&&&', [n.name for n in tf.get_default_graph().as_graph_def().node])
+            prelogits, _ = network.inference(image_batch, args.keep_probability, 
+                                phase_train=phase_train_placeholder, bottleneck_layer_size=args.embedding_size,
+                                weight_decay=args.weight_decay)
+            
+            embeddings = tf.nn.l2_normalize(prelogits, 1, 1e-10, name='embeddings')
+            # embeddings = tf.identity(prelogits)
 
-            # Get output tensor
-            embeddings = tf.get_default_graph().get_tensor_by_name("embeddings:0")
-#              
+            # Initialize variables
+            sess.run(tf.global_variables_initializer(), feed_dict={phase_train_placeholder:False})
+            sess.run(tf.local_variables_initializer(), feed_dict={phase_train_placeholder:False})
+
             coord = tf.train.Coordinator()
             tf.train.start_queue_runners(coord=coord, sess=sess)
 
             evaluate(sess, eval_enqueue_op, image_paths_placeholder, labels_placeholder, phase_train_placeholder, batch_size_placeholder, control_placeholder,
                 embeddings, label_batch, paths, actual_issame, args.lfw_batch_size, args.lfw_nrof_folds, args.distance_metric, args.subtract_mean,
                 args.use_flipped_images, args.use_fixed_image_standardization)
-
-              
+            
+            
+ 
 def evaluate(sess, enqueue_op, image_paths_placeholder, labels_placeholder, phase_train_placeholder, batch_size_placeholder, control_placeholder,
         embeddings, labels, image_paths, actual_issame, batch_size, nrof_folds, distance_metric, subtract_mean, use_flipped_images, use_fixed_image_standardization):
     # Run forward pass to calculate embeddings
-    print('Runnning forward pass on LFW images')
+    print('Runnning forward pass on LFW images')  
     
     # Enqueue one epoch of image paths and labels
     nrof_embeddings = len(actual_issame)*2  # nrof_pairs * nrof_images_per_pair
