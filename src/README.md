@@ -114,3 +114,5 @@
  - 单 gpu SphereNetwork 版本，时间为 3195s，per batch 0.25s，per epoch 2.6625min，准确度：0.966，AUC 0.994
 
  - 单 gpu Inception_resnet_v1 版本，时间为 2192s，per batch 0.17s，per epoch 1.8265min，准确度：0.973，AUC 0.996
+
+现在多 gpu 的版本还没有更改，希望不要让我失望啊，啊啊啊啊啊
