@@ -136,7 +136,10 @@ def create_input_pipeline(input_queue, image_size, nrof_preprocess_threads, batc
         shapes=[image_size + (3,), ()], enqueue_many=True,
         capacity=4 * nrof_preprocess_threads * 100,
         allow_smaller_final_batch=True)
-    
+    # print('@@@@@'*10)
+    # print('image_batch_size', image_batch.get_shape())
+    # print('label_batch_size', label_batch.get_shape())
+    # print('@@@@@'*10)
     return image_batch, label_batch
 
 def get_control_flag(control, field):

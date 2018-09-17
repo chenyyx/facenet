@@ -319,6 +319,8 @@ def train(args, sess, epoch, image_list, label_list, index_dequeue_op, enqueue_o
     control_array = np.ones_like(labels_array) * control_value
     sess.run(enqueue_op, {image_paths_placeholder: image_paths_array, labels_placeholder: labels_array, control_placeholder: control_array})
 
+    # print('####'*10, 'label', len(label_epoch))
+    # print('####'*10, 'image', len(image_epoch))
     # Training loop
     train_time = 0
     while batch_number < args.epoch_size:
@@ -330,7 +332,7 @@ def train(args, sess, epoch, image_list, label_list, index_dequeue_op, enqueue_o
             summary_writer.add_summary(summary_str, global_step=step_)
         else:
             loss_, _, step_, reg_losses_, prelogits_, cross_entropy_mean_, lr_, prelogits_norm_, accuracy_, center_loss_ = sess.run(tensor_list, feed_dict=feed_dict)
-         
+        
         duration = time.time() - start_time
         stat['loss'][step_-1] = loss_
         stat['center_loss'][step_-1] = center_loss_

@@ -295,6 +295,7 @@ def main(args):
                     stat, cross_entropy_mean, accuracy, learning_rate,
                     prelogits, prelogits_center_loss, args.random_rotate, args.random_crop, args.random_flip, prelogits_norm, args.prelogits_hist_max, args.use_fixed_image_standardization)
                 stat['time_train'][epoch-1] = time.time() - t
+                print('the %dth epoch training time is=== %.3f' %(epoch, time.time() - t))
                 
                 if not cont:
                     break
@@ -409,7 +410,7 @@ def train(args, sess, epoch, image_list, label_list, index_dequeue_op, enqueue_o
         
         duration = time.time() - start_time
         print('Epoch: [%d][%d/%d]\tTime %.3f\tLoss %2.3f\tXent %2.3f\tRegLoss %2.3f\tAccuracy %2.3f\tLr %2.5f\tCl %2.3f' %
-              (epoch, batch_number+1, args.epoch_size, duration, loss_, cross_entropy_mean_, np.sum(reg_losses_), accuracy_, lr_, center_loss_))
+              (epoch, batch_number+2, args.epoch_size, duration, loss_, cross_entropy_mean_, np.sum(reg_losses_), accuracy_, lr_, center_loss_))
         batch_number += args.num_gpus
         train_time += duration
     # Add validation loss and accuracy to summary
