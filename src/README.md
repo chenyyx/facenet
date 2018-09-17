@@ -83,3 +83,34 @@
  - 20 个 epoch 运行时间。
  - 每个 batch 运行时间。
  - 训练完成的模型准确度。
+
+
+## 5. cosface 对比验证
+
+**cosface 已经修改为最新的多 gpu 版本了，在训练过程中是没有计算相应模型的准确度的，所以需要我们训练完成之后将存储得到的模型结果进行 evaluate，也就是验证一下准确度。**
+
+**Surprise：** 今天在跑模型训练的时候，因为只能跑 单 gpu 的训练版本，其他的所有 gpu 都被使用着，所以我就采用了 2 种提供的方法来对 cosface 进行训练。换用了不同的网络结构，一种是 sphere_network，一种是 inception_resnet_v1 。得到的结果令我大吃一惊。
+
+ - 1. 单 gpu 的 sphere_network 运行所需代码：
+    - 训练的 shell 脚本： train.sh ，脚本中的 NETWORK 参数改为 sphere_network 。其余的保持不变。
+    - 训练的 python 代码：train/train_multi_gpu.py
+    - 验证的 shell 脚本：test.sh，将 MODEL_DIR 修改一下，修改为对应的训练完成的模型的文件夹，一定要与训练时使用的 网络结构 对应上。
+    - 验证的 python 代码：test/test.py 不需要更改。值得注意的一点是，embedding_size 是与训练时候的保持一致。
+    - 训练得到的结果文件（模型存储位置）：/chenyyx/cosface_tf/models/sphere_network_cosface_112_0_64._2._0.35_ADAM_--fc_bn_96_1024/20180917-151945
+
+ - 2. 单 gpu 的 inception_resnet_v1 运行所需代码：
+    - 训练的 shell 脚本： train.sh ，脚本中的 NETWORK 参数改为 inception_net。其余的保持不变。
+    - 训练的 python 代码： train/train_multi_gpu.py
+    - 验证的 shell 脚本：test.sh ，将MODEL_DIR 修改一下，修改为对应的训练完成的模型的文件夹，一定要与训练时使用的网络结构对应上。将下面的 --network_type 改为 inception_resnet_v1 。
+    - 验证的 python 代码： test/test.py 需要更改（因为原本的 test 文件中是没有考虑到我们的 inception_resnet_v1 这个模型的，所以需要咱们自己添加一下），在判断网络结构的部分，添加如下代码：
+    elif args.network_type == 'inception_resnet_v1':
+                prelogits, _ = network_2.inference(images_placeholder, 1, True, args.embedding_size, 0.0, False)
+    - 训练得到的结果文件（模型存储位置）：/chenyyx/cosface_tf/models/inception_net_cosface_112_0_64._2._0.35_ADAM_--fc_bn_96_1024/20180917-164728
+
+
+
+**对应的时间和准确度如下：20 个 epoch**
+
+ - 单 gpu SphereNetwork 版本，时间为 3195s，per batch 0.25s，per epoch 2.6625min，准确度：0.966，AUC 0.994
+
+ - 单 gpu Inception_resnet_v1 版本，时间为 2192s，per batch 0.17s，per epoch 1.8265min，准确度：0.973，AUC 0.996
