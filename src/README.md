@@ -115,4 +115,37 @@
 
  - 单 gpu Inception_resnet_v1 版本，时间为 2192s，per batch 0.17s，per epoch 1.8265min，准确度：0.973，AUC 0.996
 
-现在多 gpu 的版本还没有更改，希望不要让我失望啊，啊啊啊啊啊aadada
+**备注：**
+
+CosFace 的 多 GPU 版本，无需多做更改，只需要将对应的 network 的类型，num_gpus 的个数指定，就可以进行训练了。
+
+## 6. 总结
+
+现在无论哪种网络结构，都是可以跑通的。包括：
+ - 1.CosFace 的多 GPU 版本，和单 GPU 版本。 
+ - 2.FaceNet 的 tripletloss 的 多 GPU 和单 GPU 版本。 
+ - 3.FaceNet 的 Softmax 的多 GPU 和 单 GPU 版本。
+
+但是因为发现了一个问题，可能导致 多 GPU 训练时出现，两个 GPU 拿到的训练数据相同，导致出现不必要的时间损失。应该作出更改。
+
+现在更改的结果如下（单 gpu 的都已经测试完成，多 gpu 的待测试）：
+
+ - CosFace
+    - 单 gpu （分为 sphere 和 inception 两种版本）更改已完成，测试已完成。数据使用的是 112X96.
+        - sphere ------ 20180917-151945，Time：3195s，ACC：0.966
+        - inception ----- 20180917-164728，Time：2192s，ACC：0.973
+    - 多 gpu （分为 sphere 和 inception 两种版本）更改已完成，正在使用 双 gpu 测试。数据使用的是 112X96.
+        - sphere ------ Time
+        - inception ----- Time
+
+ - tripletloss
+    - 单 gpu 更改已完成，测试已完成。数据使用的是 160 。
+        - 20180906-111143，Time：6379.617s，ACC：0.71150
+    - 多 gpu 更改未完成，测试未完成。数据使用的是 160 。
+        - aa
+
+ - softmax
+    - 单 gpu 更改已完成，测试已完成。数据使用的是 160 。
+        - 20180914-130324  ----- Time 144min，ACC 0.91317
+    - 多 gpu 更改已完成，测试未完成。数据使用的是 160 。
+        - aaa

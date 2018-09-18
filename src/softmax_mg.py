@@ -142,10 +142,16 @@ def main(args):
         tower_prelogits = []
         tower_prelogits_norm = []
         tower_center_loss = []
+        tower_embeddings = []
+        embeddings_extend = []
+        tower_label = []
+        label_extend = []
         for i in range(args.num_gpus):
             # 此处进行数据的下一个 batch 的获取
             if i > 0:
                 image_batch, label_batch = facenet.create_input_pipeline(input_queue, image_size, nrof_preprocess_threads, batch_size_placeholder)
+                tower_label.append(label_batch)
+                label_extend.extend(label_batch)
             with tf.device('/gpu:' + str(i)):
                 with tf.name_scope('tower_' + str(i)) as scope:
                     with tf.variable_scope(tf.get_variable_scope()) as var_scope:
@@ -165,6 +171,8 @@ def main(args):
                                 scope='Logits', reuse=False)
 
                             embeddings = tf.nn.l2_normalize(prelogits, 1, 1e-10, name='embeddings')
+                            tower_embeddings.append(embeddings)
+                            embeddings_extend.extend(embeddings)
 
                             # Norm for the prelogits
                             eps = 1e-4
@@ -311,10 +319,16 @@ def main(args):
                 save_variables_and_metagraph(sess, saver, summary_writer, model_dir, subdir, epoch)
 
                 # Evaluate on LFW
+                # t = time.time()
+                # if args.lfw_dir:
+                #     evaluate(sess, enqueue_op, image_paths_placeholder, labels_placeholder, phase_train_placeholder, batch_size_placeholder, control_placeholder, 
+                #         embeddings, label_batch, lfw_paths, actual_issame, args.lfw_batch_size, args.lfw_nrof_folds, log_dir, step, summary_writer, stat, epoch, 
+                #         args.lfw_distance_metric, args.lfw_subtract_mean, args.lfw_use_flipped_images, args.use_fixed_image_standardization)
+                # stat['time_evaluate'][epoch-1] = time.time() - t
                 t = time.time()
                 if args.lfw_dir:
                     evaluate(sess, enqueue_op, image_paths_placeholder, labels_placeholder, phase_train_placeholder, batch_size_placeholder, control_placeholder, 
-                        embeddings, label_batch, lfw_paths, actual_issame, args.lfw_batch_size, args.lfw_nrof_folds, log_dir, step, summary_writer, stat, epoch, 
+                        embeddings_extend, label_extend, lfw_paths, actual_issame, args.lfw_batch_size, args.lfw_nrof_folds, log_dir, step, summary_writer, stat, epoch, 
                         args.lfw_distance_metric, args.lfw_subtract_mean, args.lfw_use_flipped_images, args.use_fixed_image_standardization)
                 stat['time_evaluate'][epoch-1] = time.time() - t
 
