@@ -130,22 +130,22 @@ CosFace 的 多 GPU 版本，无需多做更改，只需要将对应的 network 
 
 现在更改的结果如下（单 gpu 的都已经测试完成，多 gpu 的待测试）：
 
- - CosFace
+ - CosFace，epoch_size 600
     - 单 gpu （分为 sphere 和 inception 两种版本）更改已完成，测试已完成。数据使用的是 112X96.
         - sphere ------ 20180917-151945，Time：3195s，ACC：0.966
         - inception ----- 20180917-164728，Time：2192s，ACC：0.973
     - 多 gpu （分为 sphere 和 inception 两种版本）更改已完成，正在使用 双 gpu 测试。数据使用的是 112X96.
-        - sphere ------ Time
-        - inception ----- Time
+        - sphere ------ 20180918-103408，Time：3600s，ACC：0.973
+        - inception ----- Time：aaa，ACC：
 
- - tripletloss
+ - tripletloss，epoch_size 1000
     - 单 gpu 更改已完成，测试已完成。数据使用的是 160 。
         - 20180906-111143，Time：6379.617s，ACC：0.71150
     - 多 gpu 更改未完成，测试未完成。数据使用的是 160 。
         - aa
 
- - softmax
+ - softmax，epoch_size 1000
     - 单 gpu 更改已完成，测试已完成。数据使用的是 160 。
         - 20180914-130324  ----- Time 144min，ACC 0.91317
     - 多 gpu 更改已完成，测试未完成。数据使用的是 160 。
-        - aaa
+        - aaa ------- Time ， ACC 
