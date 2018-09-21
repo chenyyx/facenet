@@ -1,10 +1,10 @@
 CUDA_VISIBLE_DEVICES=2,3 python softmax_mg.py \
 --logs_base_dir logs/facenet_yyx/multi_gpu/ \
 --models_base_dir models/facenet_yyx/multi_gpu/ \
---data_dir /Users/chenyao/Documents/dataset/CASIA-WebFace/CASIA-WebFace-112X96 \
+--data_dir /Users/chenyao/Documents/dataset/112X96/CASIA-WebFace/CASIA-WebFace-112X96 \
 --image_size 160 \
 --model_def models.inception_resnet_v1 \
---lfw_dir /Users/chenyao/Documents/dataset/LFW_out/ \
+--lfw_dir /Users/chenyao/Documents/dataset/160/LFW_out/ \
 --optimizer ADAM \
 --learning_rate -1 \
 --max_nrof_epochs 20 \
@@ -20,4 +20,4 @@ CUDA_VISIBLE_DEVICES=2,3 python softmax_mg.py \
 --lfw_subtract_mean \
 --validation_set_split_ratio 0.05 \
 --validate_every_n_epochs 5 \
---prelogits_norm_loss_factor 5e-4 2>&1 | tee -a logs/facenet_yyx/multi_gpu/softmax_mg_20180913_1.log
+--prelogits_norm_loss_factor 5e-4 2>&1 | tee -a logs/facenet_yyx/multi_gpu/softmax_mg_20180919_1.log
